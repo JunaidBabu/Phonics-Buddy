@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { RefreshCw, Sparkles, ChevronRight, Play } from 'lucide-react';
+import { RefreshCw, Sparkles, ChevronRight, Play, Mic, MicOff, Volume2, Bug, SkipBack } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { READING_PARAGRAPHS } from '../constants/readingData';
+import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 
 interface WordStatus {
   word: string;
@@ -16,14 +17,9 @@ export default function ReadingStage() {
   const [wordStatuses, setWordStatuses] = useState<WordStatus[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
-  const [successSound, setSuccessSound] = useState<HTMLAudioElement | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
 
-  useEffect(() => {
-    // Preload a happy sound
-    const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2013/2013-preview.mp3');
-    setSuccessSound(audio);
-    loadNewContent('word');
-  }, []);
+  const { isListening, transcript, startListening, stopListening, error, isSupported, resetTranscript } = useSpeechRecognition();
 
   const loadNewContent = useCallback((newLevel: 'word' | 'sentence' | 'paragraph') => {
     setIsLoading(true);
@@ -55,16 +51,71 @@ export default function ReadingStage() {
     })));
     setCurrentIndex(0);
     setIsLoading(false);
-  }, []);
+    resetTranscript();
+  }, [resetTranscript]);
+
+  useEffect(() => {
+    loadNewContent('word');
+  }, [loadNewContent]);
+
+  // Clean pronunciation logic (strips punctuation for the voice engine)
+  const pronounceWord = (word: string) => {
+    // Strip trailing punctuation so it doesn't stumble on commas/periods
+    const cleanWord = word.replace(/[.,!?]$/, '');
+    const utterance = new SpeechSynthesisUtterance(cleanWord);
+    
+    // Attempt to grab a higher quality "premium" or "Neural" voice from the device
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoices = voices.filter(v => 
+      v.name.includes('Google') || 
+      v.name.includes('Samantha') || // Good macOS voice
+      v.name.includes('Ava') || // Great iOS/macOS premium voice
+      v.name.includes('Premium') ||
+      v.name.includes('Neural') ||
+      v.name.includes('Zira') // Good Windows voice
+    );
+    
+    // Attempt to grab an Indian voice first (en-IN)
+    const indianVoice = voices.find(v => v.lang === 'en-IN' && (v.name.includes('Premium') || v.name.includes('Google') || v.name.includes('Neural') || v.name.includes('Veena') || v.name.includes('Rishi') || v.name.includes('Heera'))) 
+      || voices.find(v => v.lang.includes('en-IN') || v.lang.includes('en_IN'));
+
+    // Find the first awesome English voice, or fallback to standard English
+    const chosenVoice = indianVoice || preferredVoices.find(v => v.lang.startsWith('en')) || voices.find(v => v.lang.startsWith('en'));
+    if (chosenVoice) {
+      utterance.voice = chosenVoice;
+    }
+
+    // Adjust rate and pitch to sound friendlier and less like a robot
+    utterance.rate = 0.85; 
+    utterance.pitch = 1.4; // Higher pitch feels softer/friendlier for kids
+    utterance.lang = 'en-IN';
+    
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Monitor the microphone transcript
+  useEffect(() => {
+    if (!content || !isListening) return;
+
+    // The currently active word
+    const activeWordIndex = currentIndex;
+    const rawWord = content.words[activeWordIndex];
+    if (!rawWord) return;
+
+    // Clean padding/punctuation for validation
+    const expectedWord = rawWord.toLowerCase().replace(/[.,!?]$/, '');
+
+    // Check if the current chunk of transcript includes the active word
+    // We split by space to ensure we match whole words
+    const transcriptWords = transcript.split(/\s+/);
+    if (transcriptWords.includes(expectedWord)) {
+      handleNextWord();
+      resetTranscript();
+    }
+  }, [transcript, isListening, content, currentIndex, resetTranscript]);
 
   const handleNextWord = () => {
     if (!content) return;
-
-    // Play success sound
-    if (successSound) {
-      successSound.currentTime = 0;
-      successSound.play().catch(() => {});
-    }
 
     // Party popper effect for every word
     confetti({
@@ -94,6 +145,18 @@ export default function ReadingStage() {
     } else {
       setCurrentIndex(prev => prev + 1);
     }
+  };
+
+  const handlePrevWord = () => {
+    if (!content || currentIndex === 0) return;
+    
+    setWordStatuses(prev => prev.map((status, i) => {
+      if (i === currentIndex) return { ...status, isCurrent: false };
+      if (i === currentIndex - 1) return { ...status, isCurrent: true, isCorrect: false };
+      return status; // leave other words alone
+    }));
+    
+    setCurrentIndex(prev => prev - 1);
   };
 
   const completedCount = wordStatuses.filter((status) => status.isCorrect).length;
@@ -142,9 +205,11 @@ export default function ReadingStage() {
                   scale: status.isCurrent ? 1.25 : 1,
                   color: status.isCorrect ? '#6BCB77' : status.isCurrent ? '#FF6B6B' : '#2D3436'
                 }}
-                className={`text-5xl md:text-7xl font-black tracking-tight transition-all duration-300 ${
+                className={`text-5xl md:text-7xl font-black tracking-tight transition-all duration-300 cursor-pointer ${
                   status.isCurrent ? 'underline decoration-8 underline-offset-12' : ''
-                }`}
+                } hover:opacity-75`}
+                onClick={() => pronounceWord(status.word)}
+                title="Click to hear pronunciation"
               >
                 {status.word}
               </motion.span>
@@ -165,15 +230,26 @@ export default function ReadingStage() {
 
       {/* Parent Controls */}
       <div className="mt-12 flex flex-col items-center gap-6">
-        <div className="flex items-center gap-12">
+        <div className="flex items-center gap-8 md:gap-12">
           {!isFinished ? (
             <>
+              <button
+                onClick={handlePrevWord}
+                disabled={isLoading || !content || currentIndex === 0}
+                className={`group flex flex-col items-center gap-2 ${currentIndex === 0 ? 'opacity-50' : ''}`}
+              >
+                <div className="w-20 h-20 rounded-full bg-[#FFD93D] flex items-center justify-center text-white shadow-lg transition-all hover:scale-110 active:scale-95 border-b-4 border-[#F4C724]">
+                  <SkipBack size={32} fill="currentColor" />
+                </div>
+                <span className="text-[#F4C724] font-black uppercase tracking-widest text-[10px]">Previous</span>
+              </button>
+
               <button
                 onClick={handleNextWord}
                 disabled={isLoading || !content}
                 className="group flex flex-col items-center gap-2"
               >
-                <div className="w-28 h-28 rounded-full bg-[#6BCB77] flex items-center justify-center text-white shadow-2xl transition-all group-hover:scale-110 group-active:scale-95 border-b-8 border-[#4DA858]">
+                <div className="w-28 h-28 rounded-full bg-[#6BCB77] flex items-center justify-center text-white shadow-2xl transition-all hover:scale-110 active:scale-95 border-b-8 border-[#4DA858]">
                   <Play size={56} fill="currentColor" className="ml-2" />
                 </div>
                 <span className="text-[#4DA858] font-black uppercase tracking-widest text-xs">Next Word</span>
@@ -184,11 +260,33 @@ export default function ReadingStage() {
                 disabled={isLoading}
                 className="group flex flex-col items-center gap-2"
               >
-                <div className="w-20 h-20 rounded-full bg-[#B2BEC3] flex items-center justify-center text-white shadow-lg transition-all group-hover:scale-110 group-active:scale-95 border-b-4 border-[#7F8C8D]">
+                <div className="w-20 h-20 rounded-full bg-[#B2BEC3] flex items-center justify-center text-white shadow-lg transition-all hover:scale-110 active:scale-95 border-b-4 border-[#7F8C8D]">
                   <RefreshCw size={32} />
                 </div>
-                <span className="text-[#7F8C8D] font-black uppercase tracking-widest text-[10px]">Skip to Next</span>
+                <span className="text-[#7F8C8D] font-black uppercase tracking-widest text-[10px]">Skip</span>
               </button>
+              
+              {isSupported && (
+                <button
+                  onClick={isListening ? stopListening : startListening}
+                  className="group flex flex-col items-center gap-2 relative"
+                >
+                  {isListening && (
+                    <span className="absolute -top-2 -right-2 flex h-4 w-4">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500"></span>
+                    </span>
+                  )}
+                  <div className={`w-28 h-28 rounded-full flex items-center justify-center text-white shadow-2xl transition-all hover:scale-110 active:scale-95 border-b-8 ${
+                    isListening ? 'bg-[#FF6B6B] border-[#D63031]' : 'bg-[#0984E3] border-[#74B9FF]'
+                  }`}>
+                    {isListening ? <Mic size={52} /> : <MicOff size={52} />}
+                  </div>
+                  <span className={`font-black uppercase tracking-widest text-xs ${isListening ? 'text-[#D63031]' : 'text-[#0984E3]'}`}>
+                    {isListening ? 'Listening...' : 'Turn on Mic'}
+                  </span>
+                </button>
+              )}
             </>
           ) : (
             <button
@@ -203,6 +301,38 @@ export default function ReadingStage() {
           )}
         </div>
       </div>
+
+      {/* Debug Transcript UI (Fixed at bottom left) */}
+      {showDebug && (
+        <div className="fixed bottom-4 left-4 max-w-sm w-full bg-[#2D3436]/90 text-[#6BCB77] p-4 rounded-2xl font-mono text-xs shadow-2xl backdrop-blur-md z-50 border border-[#2D3436]">
+          <div className="flex justify-between items-center mb-2 border-b border-white/10 pb-2">
+            <span className="font-bold text-white uppercase tracking-widest text-[10px]">Mic Transcript</span>
+            <span className={`text-[10px] ${isListening ? 'text-[#FF6B6B] animate-pulse' : 'text-gray-500'}`}>
+              {isListening ? '● REC' : 'OFF'}
+            </span>
+          </div>
+          <div className="min-h-[60px] max-h-[120px] overflow-y-auto">
+            {isSupported ? (
+              <p className="whitespace-pre-wrap leading-relaxed break-words">
+                {transcript || (isListening ? 'Waiting for voice...' : 'Mic is muted.')}
+              </p>
+            ) : (
+              <p className="text-[#FF6B6B]">Speech Recognition is not supported in this browser.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Subtle Debug Toggle Button (Fixed at bottom right) */}
+      <button 
+        onClick={() => setShowDebug(s => !s)}
+        className={`fixed bottom-4 right-4 p-3 rounded-full shadow-md transition-all z-50 hover:scale-110 active:scale-95 ${
+          showDebug ? 'bg-[#FF6B6B] text-white' : 'bg-white/80 text-[#B2BEC3] hover:bg-white hover:text-[#2D3436]'
+        }`}
+        title="Toggle Debug Transcript"
+      >
+        <Bug size={20} />
+      </button>
     </div>
   );
 }
